@@ -20,7 +20,7 @@ type PlatformDeps = {
   }) => unknown;
   buildFetchFormData: (
     data: unknown,
-  ) => { body: unknown; contentType?: string } | null;
+  ) => { body: unknown; contentType?: string; duplex?: "half" } | null;
 };
 
 export const platformDeps: PlatformDeps = {

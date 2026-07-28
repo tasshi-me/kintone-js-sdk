@@ -6,6 +6,7 @@ import https from "node:https";
 import os from "node:os";
 import { Agent, ProxyAgent } from "undici";
 import type { ProxyConfig } from "../http/HttpClientInterface";
+import type FormData from "form-data";
 import packageJson from "../../package.json";
 
 const readFile = promisify(fs.readFile);
@@ -109,7 +110,7 @@ export const getVersion = () => {
 
 export const buildFetchFormData = (
   data: unknown,
-): { body: unknown; contentType?: string } | null => {
+): { body: unknown; contentType?: string; duplex?: "half" } | null => {
   if (
     !data ||
     typeof data !== "object" ||
@@ -118,12 +119,47 @@ export const buildFetchFormData = (
   ) {
     return null;
   }
-  const fd = data as import("form-data");
+  const fd = data as FormData;
   return {
-    body: fd.getBuffer(),
+    // `fd.getBuffer()` throws if any appended field is a Stream (e.g. a
+    // `fs.createReadStream()` passed as `file.data`, which docs/file.md
+    // documents as supported), so bridge the FormData's own "data"/"end"
+    // events into a ReadableStream instead of buffering it eagerly.
+    body: buildReadableStreamFromFormData(fd),
     contentType: `multipart/form-data; boundary=${fd.getBoundary()}`,
+    // Required by the Fetch spec whenever the body is a ReadableStream.
+    duplex: "half",
   };
 };
+
+/* eslint-disable n/no-unsupported-features/node-builtins --
+   ReadableStream has been available in Node.js since well before this
+   package's minimum supported version; it's only listed as "experimental"
+   until 22.15/23.11 in terms of API stability commitment, not availability -
+   fetch() (used unconditionally elsewhere in this codebase) already depends
+   on it being present. */
+const buildReadableStreamFromFormData = (
+  formData: FormData,
+): ReadableStream<Uint8Array> => {
+  return new ReadableStream({
+    start(controller) {
+      formData.on("data", (chunk: Buffer | string) => {
+        // Text fields can come through as plain strings rather than
+        // Buffers; fetch's body reader requires Uint8Array chunks.
+        controller.enqueue(
+          typeof chunk === "string" ? Buffer.from(chunk) : chunk,
+        );
+      });
+      formData.on("end", () => controller.close());
+      formData.on("error", (error: Error) => controller.error(error));
+      // `form-data` (built on `combined-stream`) only starts flowing once
+      // explicitly resumed - unlike modern Readable streams, attaching a
+      // "data" listener alone does not start the flow.
+      formData.resume();
+    },
+  });
+};
+/* eslint-enable n/no-unsupported-features/node-builtins */
 
 export const buildFetchDispatcher = ({
   httpsAgent,

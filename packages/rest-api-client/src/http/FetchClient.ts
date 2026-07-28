@@ -96,13 +96,27 @@ export class FetchClient implements HttpClient {
     const { method, url, headers, data, responseType, dispatcher, timeout } =
       requestConfig;
 
-    const fetchOptions: RequestInit & { dispatcher?: unknown } = {
+    // Computed once and threaded through: `buildFetchFormData` wraps
+    // Node.js FormData in a fresh ReadableStream on every call, and that
+    // stream starts flowing (and consuming the source) as soon as it's
+    // constructed - calling it more than once per request would attach
+    // multiple redundant listeners to the same FormData instance.
+    const formData =
+      data !== undefined ? platformDeps.buildFetchFormData(data) : null;
+
+    const fetchOptions: RequestInit & {
+      dispatcher?: unknown;
+      duplex?: "half";
+    } = {
       method: method.toUpperCase(),
-      headers: this.buildFetchHeaders(headers, data),
+      headers: this.buildFetchHeaders(headers, data, formData),
     };
 
     if (data !== undefined) {
-      fetchOptions.body = this.buildFetchBody(data);
+      fetchOptions.body = this.buildFetchBody(data, formData);
+      if (formData?.duplex) {
+        fetchOptions.duplex = formData.duplex;
+      }
     }
 
     if (dispatcher !== undefined) {
@@ -198,10 +212,10 @@ export class FetchClient implements HttpClient {
 
   private buildFetchHeaders(
     headers: Record<string, string>,
-    data?: unknown,
+    data: unknown,
+    formData: ReturnType<typeof platformDeps.buildFetchFormData>,
   ): Record<string, string> {
     const fetchHeaders = { ...headers };
-    const formData = platformDeps.buildFetchFormData(data);
 
     if (formData) {
       for (const key of Object.keys(fetchHeaders)) {
@@ -219,8 +233,10 @@ export class FetchClient implements HttpClient {
     return fetchHeaders;
   }
 
-  private buildFetchBody(data: unknown): string | globalThis.FormData {
-    const formData = platformDeps.buildFetchFormData(data);
+  private buildFetchBody(
+    data: unknown,
+    formData: ReturnType<typeof platformDeps.buildFetchFormData>,
+  ): string | globalThis.FormData {
     if (formData) {
       return formData.body as globalThis.FormData;
     }
