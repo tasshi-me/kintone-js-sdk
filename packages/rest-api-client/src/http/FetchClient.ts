@@ -96,27 +96,27 @@ export class FetchClient implements HttpClient {
     const { method, url, headers, data, responseType, dispatcher, timeout } =
       requestConfig;
 
-    // Computed once and threaded through: `buildFetchFormData` wraps
-    // Node.js FormData in a fresh ReadableStream on every call, and that
-    // stream starts flowing (and consuming the source) as soon as it's
-    // constructed - calling it more than once per request would attach
-    // multiple redundant listeners to the same FormData instance.
+    // Computed once and threaded through: Node.js FormData is drained via
+    // its own "data"/"end" events, and calling this more than once per
+    // request would attach multiple redundant listeners to the same
+    // FormData instance.
     const formData =
-      data !== undefined ? platformDeps.buildFetchFormData(data) : null;
+      data !== undefined ? await platformDeps.buildFetchFormData(data) : null;
 
-    const fetchOptions: RequestInit & {
-      dispatcher?: unknown;
-      duplex?: "half";
-    } = {
+    const fetchOptions: RequestInit & { dispatcher?: unknown } = {
       method: method.toUpperCase(),
       headers: this.buildFetchHeaders(headers, data, formData),
     };
 
     if (data !== undefined) {
-      fetchOptions.body = this.buildFetchBody(data, formData);
-      if (formData?.duplex) {
-        fetchOptions.duplex = formData.duplex;
-      }
+      // `Buffer`'s generic `ArrayBufferLike` parameter doesn't structurally
+      // satisfy `RequestInit["body"]`'s `ArrayBufferView` under every
+      // lib/@types/node combination, even though undici accepts a real
+      // Buffer at runtime.
+      fetchOptions.body = this.buildFetchBody(
+        data,
+        formData,
+      ) as RequestInit["body"];
     }
 
     if (dispatcher !== undefined) {
@@ -213,7 +213,7 @@ export class FetchClient implements HttpClient {
   private buildFetchHeaders(
     headers: Record<string, string>,
     data: unknown,
-    formData: ReturnType<typeof platformDeps.buildFetchFormData>,
+    formData: Awaited<ReturnType<typeof platformDeps.buildFetchFormData>>,
   ): Record<string, string> {
     const fetchHeaders = { ...headers };
 
@@ -235,10 +235,10 @@ export class FetchClient implements HttpClient {
 
   private buildFetchBody(
     data: unknown,
-    formData: ReturnType<typeof platformDeps.buildFetchFormData>,
-  ): string | globalThis.FormData {
+    formData: Awaited<ReturnType<typeof platformDeps.buildFetchFormData>>,
+  ): string | globalThis.FormData | Buffer {
     if (formData) {
-      return formData.body as globalThis.FormData;
+      return formData.body as globalThis.FormData | Buffer;
     }
     return JSON.stringify(data);
   }

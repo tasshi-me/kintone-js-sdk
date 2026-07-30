@@ -108,9 +108,9 @@ export const getVersion = () => {
   return packageJson.version;
 };
 
-export const buildFetchFormData = (
+export const buildFetchFormData = async (
   data: unknown,
-): { body: unknown; contentType?: string; duplex?: "half" } | null => {
+): Promise<{ body: unknown; contentType?: string } | null> => {
   if (
     !data ||
     typeof data !== "object" ||
@@ -123,43 +123,30 @@ export const buildFetchFormData = (
   return {
     // `fd.getBuffer()` throws if any appended field is a Stream (e.g. a
     // `fs.createReadStream()` passed as `file.data`, which docs/file.md
-    // documents as supported), so bridge the FormData's own "data"/"end"
-    // events into a ReadableStream instead of buffering it eagerly.
-    body: buildReadableStreamFromFormData(fd),
+    // documents as supported). Drain the FormData's own "data"/"end" events
+    // into a Buffer ourselves instead, so a Stream field no longer crashes.
+    // A Buffer (rather than a ReadableStream) also keeps the body resendable
+    // if the server issues a redirect, and lets fetch set Content-Length.
+    body: await bufferFormData(fd),
     contentType: `multipart/form-data; boundary=${fd.getBoundary()}`,
-    // Required by the Fetch spec whenever the body is a ReadableStream.
-    duplex: "half",
   };
 };
 
-/* eslint-disable n/no-unsupported-features/node-builtins --
-   ReadableStream has been available in Node.js since well before this
-   package's minimum supported version; it's only listed as "experimental"
-   until 22.15/23.11 in terms of API stability commitment, not availability -
-   fetch() (used unconditionally elsewhere in this codebase) already depends
-   on it being present. */
-const buildReadableStreamFromFormData = (
-  formData: FormData,
-): ReadableStream<Uint8Array> => {
-  return new ReadableStream({
-    start(controller) {
-      formData.on("data", (chunk: Buffer | string) => {
-        // Text fields can come through as plain strings rather than
-        // Buffers; fetch's body reader requires Uint8Array chunks.
-        controller.enqueue(
-          typeof chunk === "string" ? Buffer.from(chunk) : chunk,
-        );
-      });
-      formData.on("end", () => controller.close());
-      formData.on("error", (error: Error) => controller.error(error));
-      // `form-data` (built on `combined-stream`) only starts flowing once
-      // explicitly resumed - unlike modern Readable streams, attaching a
-      // "data" listener alone does not start the flow.
-      formData.resume();
-    },
+const bufferFormData = (formData: FormData): Promise<Buffer> => {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    formData.on("data", (chunk: Buffer | string) => {
+      // Text fields can come through as plain strings rather than Buffers.
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    });
+    formData.on("end", () => resolve(Buffer.concat(chunks)));
+    formData.on("error", reject);
+    // `form-data` (built on `combined-stream`) only starts flowing once
+    // explicitly resumed - unlike modern Readable streams, attaching a
+    // "data" listener alone does not start the flow.
+    formData.resume();
   });
 };
-/* eslint-enable n/no-unsupported-features/node-builtins */
 
 export const buildFetchDispatcher = ({
   httpsAgent,
